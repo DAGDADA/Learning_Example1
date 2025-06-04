@@ -5,6 +5,7 @@ from attention import SelfAttention
 
 class CLIP(nn.Module):
     def __init__(self):
+        super().__init__()
         # 49408表示词汇表的大小，768是clip固定的嵌入大小。77表示序列长度
         self.embedding = CLIPEmbedingding(49408,768,77)
 
@@ -44,17 +45,16 @@ class CLIPLayer(nn.Module):
         residue = x
         ## 自注意力
         x = self.layernorm_1(x)
-        x = self.attention(x,causal_maks=True)
+        x = self.attention(x,causal_mask=True)
         x += residue
 
         ## 前馈
         residue = x
         x = self.layernorm_2(x)
         x = self.linear_1(x)
-        x = x * torch.sigmoid(1.702 * x) # QuickGELU函数，没有原理实践中好用
+        x = x * torch.sigmoid(1.702 * x) # QuickGELU函数，没有原理 实践中好用
         x = self.linear_2(x)
         x += residue
-
         return x
 
 

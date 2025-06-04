@@ -8,7 +8,7 @@ class VAE_Encoder(nn.Module):
     # 但变分自编码器实际上不是在做压缩，而是在学习一个潜空间，是在学习一个分布，其输出实际上是均值与对数方差
     # 图像大小不断减小，但channel不断增大
     def __init__(self):
-        super().__init__( # U_net
+        super().__init__(
             # (Batch_size,Channel,Height,Width) -> (Batch_size,128,Height, Width)
             nn.Conv2d(3, 128, kernel_size=3, padding=1),
 

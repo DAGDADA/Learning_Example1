@@ -62,15 +62,10 @@ class VAE_Decoder(nn.Sequential):
         return x
 
 
-
-
-
-
 class VAE_AttentionBlock(nn.Module):
 
     def __init__(self,channels:int):
         super().__init__()
-
         # 组归一化 以及 自注意力
         # 特征来源于卷积，组归一化和层归一化相近，但不同的是，组归一化但不是对所有的特征进行归一化
         # 而是基于彼此接近的特征将具有相近的分布思想，将其分组进行归一化
