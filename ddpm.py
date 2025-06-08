@@ -20,4 +20,87 @@ class DDPMSampler:
         timesteps = (np.arange(0,num_inference_steps)*step_ratio).round()[::-1].copy().astype(np.int64)
         self.timesteps = torch.from_numpy(timesteps)
 
-    # def add_noise(self,latent:torch.tensor,timesteps):
+
+    def set_strength(self,strength=1):
+        start_step = self.num_inference_steps - int(self.num_inference_steps * strength)
+        self.timesteps = self.timesteps[start_step:]
+        self.start_step = start_step
+
+
+    # latents = sampler.add_noise(latents,sampler.timesteps[0]) # 初始值
+    def add_noise(self,
+                  original_samples:torch.FloatTensor,
+                  timesteps:torch.IntTensor) -> torch.FloatTensor:
+        alpha_cumprod = self.alpha_cumprod.to(device = original_samples.device,dtype=original_samples.dtype)
+        timesteps = timesteps.to(device = original_samples.device)
+
+        sqrt_alpha_prod = alpha_cumprod[timesteps] ** 0.5
+        sqrt_alpha_prod = sqrt_alpha_prod.flatten()
+        while len(sqrt_alpha_prod.shape) < len(original_samples.shape):  # 不断增加维度直到二者有相同的维度.否则就无法将它们相加或相乘
+            sqrt_alpha_prod = sqrt_alpha_prod.unsqueeze(-1)
+
+        sqrt_one_minus_alpha_prod = (1 - alpha_cumprod[timesteps]) ** 0.5  # 标准差
+        sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.flatten()
+        while len(sqrt_one_minus_alpha_prod.shape) < len(original_samples.shape):
+            sqrt_one_minus_alpha_prod = sqrt_one_minus_alpha_prod.unsqueeze(-1)
+
+        # 从高斯分布中采样噪声
+        # q(xt|x0) = N(xt:√alpha_t_bar﹒x0,(1-√alpha_t_bar)﹒I) DDPM formula（4）
+        noise = torch.randn(original_samples.shape,generator = self.generator,device = original_samples.device,dtype=original_samples.dtype)
+        noisy_samples =  (sqrt_alpha_prod * original_samples) +  (sqrt_one_minus_alpha_prod * noise)
+        return noisy_samples
+
+
+    def _get_previous_timestep(self,timestep:int)->int:
+        prev_t = timestep - (self.num_training_steps // self.num_inference_steps)
+        return prev_t
+
+
+    def _get_variance(self,timestep:int)->torch.Tensor:
+        prev_t = self._get_previous_timestep(timestep)
+
+        alpha_prod_t = self.alpha_cumprod[timestep]
+        alpha_prod_t_prev = self.alpha_cumprod[prev_t] if prev_t >= 0 else self.one
+        current_beta_t = 1 - alpha_prod_t / alpha_prod_t_prev
+
+        # DDPM formula（7）
+        variance = (1 - alpha_prod_t_prev) / (1 - alpha_prod_t) * current_beta_t
+        variance = torch.clamp(variance, min=1e-20)
+        return variance
+
+
+    def step(self, timestep:int, latents:torch.Tensor, model_output:torch.Tensor):
+        t = timestep
+        prev_t = self._get_previous_timestep(t)
+
+        alpha_prod_t = self.alpha_cumprod[t]
+        alpha_prod_t_prev = self.alpha_cumprod[prev_t] if prev_t >= 0 else self.one
+        beta_prod_t = 1 - alpha_prod_t
+        beta_prod_t_prev = 1 - alpha_prod_t_prev
+        current_alpha_t = alpha_prod_t / alpha_prod_t_prev
+        current_beta_t = 1 - current_alpha_t
+
+        # 计算 预测原始样本 pred_origin_sample  DDPM formula（15）
+        # x0 ≈ x0_pred = (xt - √(1-alpha_t_bar)﹒εθ（xt））/ √alpha_t_bar
+        pred_origin_sample = (latents - (beta_prod_t ** 0.5)* model_output) / (alpha_prod_t ** 0.5)
+
+        # 计算预测原始样本pred_origin_sample和当前样本xt的系数
+        # DDPM formula（7）
+        pred_origin_sample_coeff = (alpha_prod_t_prev ** 0.5) * current_beta_t / beta_prod_t
+        current_sample_coeff = (current_alpha_t ** 0.5)*(1 - alpha_prod_t_prev) / beta_prod_t
+
+        # 计算预测前样本的分布均值
+        # DDPM formula（7）
+        pred_prev_sample =  pred_origin_sample_coeff * pred_origin_sample + current_sample_coeff * latents
+
+        variance = 0
+        if t>0 :
+            device = model_output.device
+            noise = torch.randn(model_output.shape,generator = self.generator,device = device,dtype=model_output.dtype)
+            variance = (self._get_variance(t) ** 0.5) * noise
+
+        # z = N(0,1) -> N(mean,stdev^2) = x
+        # x = mean + stdev * z
+        pred_prev_sample = pred_prev_sample + variance
+
+        return pred_prev_sample

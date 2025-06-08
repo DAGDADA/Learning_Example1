@@ -3,7 +3,7 @@ from torch import nn
 from torch.nn import functional as F
 from decoder import VAE_AttentionBlock, VAE_ResidualBlock
 
-class VAE_Encoder(nn.Module):
+class VAE_Encoder(nn.Sequential):
     # 将图像转换为更小的东西，可以视为压缩图像
     # 但变分自编码器实际上不是在做压缩，而是在学习一个潜空间，是在学习一个分布，其输出实际上是均值与对数方差
     # 图像大小不断减小，但channel不断增大
@@ -78,7 +78,7 @@ class VAE_Encoder(nn.Module):
         variance = log_variance.exp()
 
         # (Batch_size,4,Height/8,Width/8)  获得标准差
-        stdev = variance.exp().sqrt()
+        stdev = variance.sqrt()
 
         # if want to z = N(0,1) -> N(mean,stdev)=x
         # x = mean + stdev * z
