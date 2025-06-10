@@ -3,43 +3,53 @@ from torch import nn
 from torch.nn import functional as F, Upsample
 from attention import SelfAttention, CrossAttention
 
-class Diffusion(nn.Module):
-    def __init__(self):
+class TimeEmbedding(nn.Module):
+    def __init__(self, n_embd:int):
         super().__init__()
-        self.time_embedding = TimeEmbedding(320) # 时间嵌入的大小
-        self.unet = UNET()
-        self.final = UNET_OutputLayer(320,4)
+        self.linear_1 = nn.Linear(n_embd,4 * n_embd)
+        self.linear_2 = nn.Linear(4 * n_embd,4 * n_embd)
 
-    def forward(self,latent: torch.Tensor,context: torch.Tensor,time:torch.Tensor)->torch.Tensor:
-        # latent: (Batch_size,4,height/8,width/8)
-        # context: (Batch_size,Seq_len,Dim)
-        # time: (1,320)
-
-        # (1,320) -> (1,1280)
-        time = self.time_embedding(time)  # 类似于Transformor的位置编码
-
-        # (Batch_size,4,height/8,width/8) -> (Batch_size,320,height/8,width/8)
-        output  = self.unet(latent,context,time)
-
-        # (Batch_size,320,height/8,width/8) -> (Batch_size,4,height/8,width/8)
-        output  = self.final(output)
-        return output
-
-
-class UNET_OutputLayer(nn.Module):
-    def __init__(self,in_channels:int,out_channels:int):
-        super().__init__()
-        self.groupnorm = nn.GroupNorm(32,in_channels)
-        self.conv = nn.Conv2d(in_channels=in_channels,out_channels=out_channels,kernel_size=3,padding=1)
-
-    def forward(self,x):
-        #  x:(Batch_size,320,height/8,width/8)
-        x = self.groupnorm(x)
+    def forward(self,x:torch.Tensor)->torch.Tensor:
+        # x: (1,320) -> (1,1280)
+        x = self.linear_1(x)
 
         x = F.silu(x)
-        #  x:(Batch_size,320,height/8,width/8) -> x:(Batch_size,4,height/8,width/8)
-        x = self.conv(x)
+
+        # x: (1,1280) -> (1,1280)
+        x = self.linear_2(x)
         return x
+
+
+class UNET_ResidualBlock(nn.Module):
+    def __init__(self,in_channels,out_channels,n_time=1280):  # 增加了时间步的嵌入
+        super().__init__()
+        self.groupnorm_feature = nn.GroupNorm(32,in_channels)
+        self.conv_feature = nn.Conv2d(in_channels,out_channels,kernel_size=3,padding=1)
+        self.linear_time = nn.Linear(n_time,out_channels)
+
+        self.groupnorm_merge = nn.GroupNorm(32, out_channels)
+        self.conv_merged = nn.Conv2d(out_channels,out_channels,kernel_size=3,padding=1)
+
+        if(in_channels == out_channels):
+            self.residual_layer = nn.Identity()
+        else:
+            self.residual_layer = nn.Conv2d(in_channels=in_channels,out_channels=out_channels,kernel_size=1,padding=0)
+
+    def forward(self,feature,time):  # 将潜在特征与时间嵌入关联起来
+        # feature:(batch_size,in_channels,height,width)
+        # time :(1,1280)
+        residual = feature
+        feature = self.groupnorm_feature(feature)
+        feature = F.silu(feature)
+        feature = self.conv_feature(feature)
+
+        time = F.silu(time)
+        time = self.linear_time(time)
+        merge = feature + time.unsqueeze(-1).unsqueeze(-1) # time 没有batch_size in_channels的维度
+        merge = self.groupnorm_merge(merge)
+        merge = F.silu(merge)
+        merge = self.conv_merged(merge)
+        return merge + self.residual_layer(residual)
 
 
 class UNET_AttentionBlock(nn.Module):
@@ -63,7 +73,7 @@ class UNET_AttentionBlock(nn.Module):
         # x:(batch_size,feature,height,width)
         # context:(Batch_size,Seq_len,Dim)
 
-        residual_long = x
+        residue_long = x
         x = self.groupnorm(x)
         x = self.conv_input(x)
 
@@ -71,64 +81,54 @@ class UNET_AttentionBlock(nn.Module):
         # x: (batch_size, feature, height, width) ->x:(batch_size,feature,height*width)
         x = x.view(n,c,h*w)
         # x:(batch_size,feature,height*width) -> x:(batch_size,height*width,feature)
-        x = x.tranpose(-1,-2)
+        x = x.transpose(-1,-2)
 
         # 归一化+自注意力
-        residual_short = x
+        residue_short = x
         x = self.layernorm_1(x)
         self.attention_1(x)
-        x += residual_short
+        x += residue_short
 
         # 归一化+交叉注意力
-        residual_short = x
+        residue_short = x
         x = self.layernorm_2(x)
         self.attention_2(x,context)
-        x += residual_short
+        x += residue_short
 
-        residual_short = x
+        residue_short = x
         x = self.layernorm_3(x)
-        x,gate = self.linear_geglu_1(x).chunk(2,-1)
+        x,gate = self.linear_geglu_1(x).chunk(2,dim=-1)
         x = x * F.gelu(gate)
-
         x = self.linear_geglu_2(x)
-        x += residual_short
+        x += residue_short
         # x:(batch_size,height*width,feature) -> x:(batch_size,feature,height*width)
         x = x.transpose(-1,-2)
-        x = x.view(n,c,h,w)
+        x = x.view((n,c,h,w))
 
-        return self.conv_output(x) + residual_long
+        return self.conv_output(x) + residue_long
 
 
-class UNET_ResidualBlock(nn.Module):
-    def __init__(self,in_channels,out_channels,n_time=1280):  # 增加了时间步的嵌入
+class UpSample(nn.Module):
+    def __init__(self, channels):
         super().__init__()
-        self.groupnorm_feature = nn.GroupNorm(32,in_channels)
-        self.conv_feature = nn.Conv2d(in_channels,out_channels,kernel_size=3,padding=1)
-        self.linear_time = nn.Linear(n_time,out_channels)
+        self.conv = nn.Conv2d(channels,channels,kernel_size=3, padding=1)
 
-        self.groupnorm_merged = nn.GroupNorm(32, out_channels)
-        self.conv_merged = nn.Conv2d(out_channels,out_channels,kernel_size=3,padding=1)
+    def forward(self,x:torch.Tensor) ->torch.Tensor:
+        # (Batch_size,feature,height,width) -> (Batch_size, feature, height*2,width*2)
+        x = F.interpolate(x,scale_factor=2,mode='nearest')
+        return self.conv(x)
 
-        if(in_channels == out_channels):
-            self.residual_layer = nn.Identity()
-        else:
-            self.residual_layer = nn.Conv2d(in_channels=in_channels,out_channels=out_channels,kernel_size=1,padding=0)
 
-    def forward(self,feature,time):  # 将潜在特征与时间嵌入关联起来
-        # feature:(batch_size,in_channels,height,width)
-        # time :(1,1280)
-        residual = feature
-        feature = self.groupnorm_feature(feature)
-        feature = F.silu(feature)
-        feature = self.conv_feature(feature)
-
-        time = F.silu(time)
-        time = self.linear_time(time)
-        merge = feature + time.unsqueeze(-1).unsqueeze(-1) # time 没有batch_size in_channels的维度
-        merge = self.groupnorm_merge(merge)
-        merge = F.silu(merge)
-        merge = self.conv_merged(merge)
-        return merge + self.residual_layer(residual)
+class SwitchSequential(nn.Sequential):
+    def forward(self, x, context, time):
+        for layer in self:
+            if isinstance(layer, UNET_AttentionBlock):
+                x = layer(x, context)  # 计算潜在向量与提示的交叉注意力
+            elif isinstance(layer, UNET_ResidualBlock):
+                x = layer(x, time)  # 计算潜在向量与时间步匹配
+            else:
+                x = layer(x)
+        return x
 
 
 class UNET(nn.Module):
@@ -166,56 +166,74 @@ class UNET(nn.Module):
             # (Batch_size,2560,height/64,width/64) -> (Batch_size,1280,height/64,width/64)
             SwitchSequential(UNET_ResidualBlock(2560,1280)),
             SwitchSequential(UNET_ResidualBlock(2560,1280)),
-
             SwitchSequential(UNET_ResidualBlock(2560, 1280),UpSample(1280)),
+
             SwitchSequential(UNET_ResidualBlock(2560, 1280), UNET_AttentionBlock(8,160)),
             SwitchSequential(UNET_ResidualBlock(2560, 1280), UNET_AttentionBlock(8, 160)),
-
             SwitchSequential(UNET_ResidualBlock(1920, 1280), UNET_AttentionBlock(8, 160),Upsample(1280)),
-            SwitchSequential(UNET_ResidualBlock(1920, 640), UNET_AttentionBlock(8, 80)),
+
             SwitchSequential(UNET_ResidualBlock(1920, 640), UNET_AttentionBlock(8, 80)),
             SwitchSequential(UNET_ResidualBlock(1280, 640), UNET_AttentionBlock(8, 80)),
-
             SwitchSequential(UNET_ResidualBlock(960, 640), UNET_AttentionBlock(8, 80),Upsample(640)),
-            SwitchSequential(UNET_ResidualBlock(960, 320), UNET_AttentionBlock(8, 40)),
 
+            SwitchSequential(UNET_ResidualBlock(960, 320), UNET_AttentionBlock(8, 40)),
             SwitchSequential(UNET_ResidualBlock(640, 320), UNET_AttentionBlock(8, 40)),
             SwitchSequential(UNET_ResidualBlock(640, 320), UNET_AttentionBlock(8, 40)),
         ])
 
-class UpSample(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.conv = nn.Conv2d(channels,channels,kernel_size=3, padding=1)
+    def forward(self, x, context, time):
+        # x: (Batch_Size, 4, Height / 8, Width / 8)
+        # context: (Batch_Size, Seq_Len, Dim)
+        # time: (1, 1280)
+        skip_connections = []
+        for layers in self.encoders:
+            x = layers(x, context, time)
+            skip_connections.append(x)
 
-    def forward(self,x:torch.Tensor) ->torch.Tensor:
-        # (Batch_size,feature,height,width) -> (Batch_size, feature, height*2,width*2)
-        x = F.interpolate(x,scale_factor=2,mode='nearest')
-        return self.conv(x)
+        x = self.bottleneck(x, context, time)
 
-class SwitchSequential(nn.Sequential):
-    def forward(self, x, context, time) -> torch.Tensor:
-        for layer in self:
-            if isinstance(layer, UNET_AttentionBlock):
-                x = layer(x, context)  # 计算潜在向量与提示的交叉注意力
-            elif isinstance(layer, UNET_ResidualBlock):
-                x = layer(x, time)  # 计算潜在向量与时间步匹配
-            else: x = layer(x)
+        for layers in self.decoders:
+            # Since we always concat with the skip connection of the encoder, the number of features increases before being sent to the decoder's layer
+            x = torch.cat((x, skip_connections.pop()), dim=1)
+            x = layers(x, context, time)
+
         return x
 
 
-class TimeEmbedding(nn.Module):
-    def __init__(self, n_embd:int):
+class UNET_OutputLayer(nn.Module):
+    def __init__(self,in_channels:int,out_channels:int):
         super().__init__()
-        self.linear_1 = nn.Linear(n_embd,4 * n_embd)
-        self.linear_2 = nn.Linear(4 * n_embd,4 * n_embd)
+        self.groupnorm = nn.GroupNorm(32,in_channels)
+        self.conv = nn.Conv2d(in_channels=in_channels,out_channels=out_channels,kernel_size=3,padding=1)
 
-    def forward(self,x:torch.Tensor)->torch.Tensor:
-        # x: (1,320) -> (1,1280)
-        x = self.linear_1(x)
+    def forward(self,x):
+        #  x:(Batch_size,320,height/8,width/8)
+        x = self.groupnorm(x)
 
         x = F.silu(x)
-
-        # x: (1,1280) -> (1,1280)
-        x = self.linear_2(x)
+        #  x:(Batch_size,320,height/8,width/8) -> x:(Batch_size,4,height/8,width/8)
+        x = self.conv(x)
         return x
+
+
+class Diffusion(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.time_embedding = TimeEmbedding(320) # 时间嵌入的大小
+        self.unet = UNET()
+        self.final = UNET_OutputLayer(320,4)
+
+    def forward(self,latent,context,time):
+        # latent: (Batch_size,4,height/8,width/8)
+        # context: (Batch_size,Seq_len,Dim)
+        # time: (1,320)
+
+        # (1,320) -> (1,1280)
+        time = self.time_embedding(time)  # 类似于Transformor的位置编码
+
+        # (Batch_size,4,height/8,width/8) -> (Batch_size,320,height/8,width/8)
+        output  = self.unet(latent,context,time)
+
+        # (Batch_size,320,height/8,width/8) -> (Batch_size,4,height/8,width/8)
+        output  = self.final(output)
+        return output

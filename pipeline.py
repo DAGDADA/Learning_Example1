@@ -19,7 +19,7 @@ def generate(
     do_cfg=True,
     cfg_scale=7.5,
     sampler_name="ddpm",
-    n_inference_step=50,
+    n_inference_steps=50,
     models={},   # model 使用预训练模型
     seed=None,  # seed 初始化随机数生成器
     device=None,
@@ -47,26 +47,26 @@ def generate(
         clip.to(device)
         if do_cfg:  # 如果想做无分类引导，那么就创造两个batch，一个有条件、一个没条件，这两个都要经过Unet的推导
             # 将prompt转化为token ： tokenizer
-            cond_token = tokenizer.batch_encoder_plus([prompt], padding="max_length", max_length=77).input_ids
-            conda_token = torch.Tensor(cond_token).to(device=device, dtype=torch.long)  # batch_size,seq_len
-            conda_context = clip(conda_token)  # batch_size,seq_len -> batch_size,seq_len,dim
+            cond_tokens = tokenizer.batch_encode_plus([prompt], padding="max_length", max_length=77).input_ids
+            conda_tokens = torch.Tensor(cond_tokens).to(dtype=torch.long,device=device)  # batch_size,seq_len
+            conda_context = clip(conda_tokens)  # batch_size,seq_len -> batch_size,seq_len,dim
 
-            uncond_token = tokenizer.batch_encoder_plus([uncond_prompt], padding="max_length", max_length=77).input_ids
-            uncond_token = torch.Tensor(uncond_prompt).to(device=device, dtype=torch.long)
-            uncond_context = clip(uncond_token)  # batch_size,seq_len -> batch_size,seq_len,dim
+            uncond_tokens = tokenizer.batch_encode_plus([uncond_prompt], padding="max_length", max_length=77).input_ids
+            uncond_tokens = torch.Tensor(uncond_tokens).to(device=device, dtype=torch.long)
+            uncond_context = clip(uncond_tokens)  # batch_size,seq_len -> batch_size,seq_len,dim
 
             # 2,seq_len,dim -> 2,77,768  (batch_size == 2)
             context = torch.cat([conda_context, uncond_context])
         else:
             # 将prompt转化为token ： tokenizer
-            token = tokenizer.batch_encoder_plus([prompt], padding="max_length", max_length=77).input_ids
-            token = torch.Tensor(token).to(device=device, dtype=torch.long)  # batch_size,seq_len
-            context = clip(token)  # 1,77,768
+            tokens = tokenizer.batch_encode_plus([prompt], padding="max_length", max_length=77).input_ids
+            tokens = torch.Tensor(tokens).to(device=device, dtype=torch.long)  # batch_size,seq_len
+            context = clip(tokens)  # 1,77,768
             to_idle(clip)
 
         if sampler_name == "ddpm":  # 噪声采样器  DDPM\DDIM\基于几何微分方程
             sampler = DDPMSampler(generator)
-            sampler.set_inference_steps(n_inference_step)
+            sampler.set_inference_timesteps(n_inference_steps)
         else:
             raise ValueError(f"unknown sampler{sampler_name}")
 

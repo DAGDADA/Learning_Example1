@@ -22,7 +22,7 @@ class CrossAttention(nn.Module):
     def forward(self,x,y):
         # x : latent : batch_size, seq_len_q, dim_q
         # y : context : batch_size, seq_len_kv, dim_kv
-        input_shape = x.shape()
+        input_shape = x.shape
         batch_size,seq_len,d_embd = input_shape
         interm_shape = (batch_size,-1,self.n_head,self.d_head)
 
